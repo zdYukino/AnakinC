@@ -1,0 +1,9 @@
+[submodule "anakin_sdk"]
+	path = anakin_sdk
+	url = https://github.com/zdYukino/anakin_sdk.git
+[submodule "anakin_env"]
+	path = anakin_env
+	url = https://github.com/zdYukino/anakin_env.git
+[submodule "anakin_mc"]
+	path = anakin_mc
+	url = https://github.com/zdYukino/anakin_mc.git
