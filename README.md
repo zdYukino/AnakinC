@@ -1,6 +1,6 @@
 # AnakinC
 
-Anakin 部署版本的统一管理仓库。三个 Git submodule 固定一组经过验证的 SDK、执行环境和模型控制器提交；每个子仓可独立配置、编译、安装和运行，父仓负责初始化、构建顺序和联合启动。
+Anakin 部署版本的统一管理仓库。Git submodule 固定 SDK、执行环境、模型控制器和 Unitree MuJoCo 的提交；父仓负责初始化、构建顺序和联合启动。
 
 首版支持 Ubuntu 22.04 x86_64、ROS 2 Humble。使用原生 CMake，保留 ROS 2/ament 接口与运行通信。
 
@@ -16,7 +16,15 @@ cd AnakinC
 
 `boostup.sh` 按父仓锁定的提交初始化 submodule、检查系统依赖，并下载和校验官方 ONNX Runtime 1.20.1。再次执行会复用已校验依赖；有未提交子仓改动时停止，干净子仓则更新到部署锁。无需 `git submodule update --remote`。
 
-`em_run.sh` 默认启动仿真模式的 ENV + MC，**官方模拟器需要单独启动**。SDK 是接口库，无需启动。默认键盘输入需要本地终端或 `ssh -t`。MC 后台运行，ENV 保留前台交互；Ctrl+C、SIGTERM 或任一组件退出都会清理本次启动的两个进程。
+`em_run.sh` 默认启动 G1 MuJoCo、仿真模式 ENV、MC 和遥测 UI；浏览器打开 http://127.0.0.1:8765/ 并连接数据源。SDK 是接口库，无需启动。默认在 Unitree 遥控、实体 Joy 和显式激活的网页输入之间自动仲裁，无需终端输入。Ctrl+C、SIGTERM 或任一组件退出都会清理本次启动的进程。UI 首次启动可能安装依赖并构建前端。
+
+首次使用还需按 [Unitree MuJoCo 安装说明](unitree_mujoco/readme.md) 准备 MuJoCo 3.3.6、Unitree SDK2 和系统依赖，然后编译模拟器：
+
+```sh
+ln -s ~/.mujoco/mujoco-3.3.6 unitree_mujoco/simulate/mujoco
+cmake -S unitree_mujoco/simulate -B unitree_mujoco/simulate/build
+cmake --build unitree_mujoco/simulate/build --parallel 4
+```
 
 ```sh
 ./build.sh mc --jobs 4 --test           # SDK → MC
@@ -24,20 +32,25 @@ cd AnakinC
 ./build.sh sdk                         # 只构建 SDK
 ./em_run.sh --dry-run                  # 检查安装并显示命令，不启动节点
 ./em_run.sh --sim --input gamepad
+./em_run.sh --sim --real-checks         # 仿真回环 + 实机状态机和检查
+./em_run.sh --no-simulator             # 使用已启动的仿真器
+./em_run.sh --no-ui                    # 不启动 UI
 ./em_run.sh --real --input remote --config /absolute/path/robot-real.yaml
 ```
 
 实机配置的 `transport.interface` 必须明确指定机器人网卡。主启动器读取所选安装或 `--config` 的 `transport.ros_domain`，保证 MC 与 ENV 一致；SDK DDS domain 与 ROS domain 是两套编号。默认仿真使用 SDK `lo/domain 31`、ROS `domain 87`。
 
-例如外部 Unitree MuJoCo 使用对应的 G1 29 自由度场景：
+`--sim --real-checks` 仍只使用仿真回环，从安装目录的 `real.yaml` 加载状态转换、守卫和时序；权限请求经过相同的本地异步流程，但使用模拟服务，不访问机器人的权限服务。要验证自定义实机规则，可增加 `--real-config /absolute/path/robot-real.yaml`。发起受控状态请求时需要新鲜的主输入；输入断连时清零运动指令并保留当前状态。仿真 reset 导致的 tick 回退、坏反馈等仍按 real 规则处理。
+
+如需单独启动模拟器，可使用对应的 G1 29 自由度场景：
 
 ```sh
-/path/to/unitree_mujoco/simulate/build/unitree_mujoco \
+./unitree_mujoco/simulate/build/unitree_mujoco \
   -r g1 -i 31 -n lo -t 1 \
-  -s /path/to/unitree_mujoco/unitree_robots/g1/scene_29dof.xml
+  -s "$PWD/unitree_mujoco/unitree_robots/g1/scene_29dof.xml"
 ```
 
-模拟器的安装、启动、摆正与 reset 由用户管理。ENV 键位、状态和实机操作见 [独立运行说明](anakin_env/docs/standalone-operation.md)。
+模拟器的安装、启动、摆正与 reset 由用户管理。ENV 输入、状态和实机操作见 [独立运行说明](anakin_env/docs/standalone-operation.md)。
 
 ## 目录与独立使用
 
@@ -48,7 +61,8 @@ AnakinC/
 ├── tests/                   # 使用假子进程的编排回归
 ├── anakin_sdk/              # submodule；消息、服务和合同
 ├── anakin_env/              # submodule；执行、输入与 SDK 通信
-└── anakin_mc/               # submodule；推理、默认模型与 .deps/ORT
+├── anakin_mc/               # submodule；推理、默认模型与 .deps/ORT
+└── unitree_mujoco/          # submodule；官方 G1 仿真器
 ```
 
 每个子仓的原生 CMake 产物位于 `build/子仓名/`，安装位于 `install/子仓名/`，构建日志位于 `log/`。ROS 日志也位于对应子仓；联合启动时 MC 输出写入 `anakin_mc/log/run-*/console.log`，ENV 输出保留在终端。主仓根目录不会生成 `build/`、`install/`、`log/`。
@@ -118,7 +132,7 @@ SDK 的安装元数据记录其实际 Git HEAD。修改 SDK 时先提交 SDK，�
 /usr/bin/python3 tests/orchestration.py
 ```
 
-离线检查包括现有 C++ 合同、配置、输入和安装测试，以及假子进程的 TTY、信号、退出清理与参数传递；不启动实际 ENV/MC、ROS/DDS、模拟器或机器人。实际仿真和实机行为由使用者另行验收。
+离线检查包括现有 C++ 合同、配置、输入和安装测试，以及假子进程的 无终端启动、信号、退出清理与参数传递；不启动实际 ENV/MC、ROS/DDS、模拟器或机器人。实际仿真和实机行为由使用者另行验收。
 
 原 workspace 同级项目与旧 `anakin_cpp_ws` 保留原状。ENV 原有未提交 UI 不在本部署基线内。子仓历史集成测试/检查点可能保留旧路径，属于历史或显式开发工具。
 

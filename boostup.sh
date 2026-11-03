@@ -20,7 +20,7 @@ while IFS= read -r line; do
   U) echo "Submodule has a merge conflict: $line" >&2; exit 2 ;;
  esac
 done < <(git -C "$repo" submodule status --recursive)
-for package in anakin_sdk anakin_env anakin_mc; do
+for package in anakin_sdk anakin_env anakin_mc unitree_mujoco; do
  if [[ -e "$repo/$package/.git" && -n $(git -C "$repo/$package" status --porcelain --untracked-files=normal) ]]; then
   echo "$package has local changes; preserve them before initialization." >&2; exit 2
  fi

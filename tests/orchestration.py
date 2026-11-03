@@ -2,20 +2,18 @@
 import json
 import os
 from pathlib import Path
-import pty
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
-import termios
 import time
 
 SOURCE = Path(__file__).resolve().parents[1]
 CHILD = r'''#!/usr/bin/python3
 import json, os
 from pathlib import Path
-import signal, sys, time, tty
+import signal, sys, time
 role = Path(__file__).resolve().parent.name
 if os.environ.get("ANAKIN_LAUNCH_CHECK_ONLY") == "1":
     sys.exit(2 if os.environ.get("TEST_PREFLIGHT_FAIL") == role else 0)
@@ -28,7 +26,6 @@ stubborn = role == "anakin_env" and os.environ.get("TEST_STUBBORN") == "1"
 for sig in (signal.SIGINT, signal.SIGTERM):
     signal.signal(sig, (lambda *_: None) if stubborn else (lambda *_: sys.exit(0)))
 if stubborn:
-    tty.setraw(sys.stdin.fileno())
     record.with_suffix(".ready").touch()
 code = os.environ.get("TEST_ENV_EXIT" if role == "anakin_env" else "TEST_MC_EXIT")
 if code:
@@ -60,11 +57,29 @@ def fixture(root):
     sdk = root / "anakin_sdk/install/anakin_sdk/share/anakin_sdk/cmake"
     sdk.mkdir(parents=True)
     (sdk / "anakin_sdkConfig.cmake").touch()
+    (sdk.parent / "local_setup.bash").touch()
+    sim = root / "unitree_mujoco/simulate/build"
+    sim.mkdir(parents=True)
+    scene = root / "unitree_mujoco/unitree_robots/g1/scene_29dof.xml"
+    scene.parent.mkdir(parents=True)
+    scene.touch()
+    extra_child = '''#!/usr/bin/python3
+import json, os, signal, sys, time
+from pathlib import Path
+name = "sim" if "unitree_mujoco" in sys.argv[0] else "ui"
+(Path(os.environ["TEST_RECORDS"]) / (name + ".json")).write_text(json.dumps(dict(pid=os.getpid(), argv=sys.argv[1:])))
+signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+while True: time.sleep(0.05)
+'''
+    for path in (sim / "unitree_mujoco", root / "ui.sh"):
+        path.write_text(extra_child)
+        path.chmod(0o755)
     config = root / "anakin_env/install/anakin_env/share/anakin_env/config"
     config.mkdir(parents=True)
     (config / "sim.yaml").write_text("mode: sim\ntransport: {ros_domain: 87}\n")
     (config / "real.yaml").write_text("mode: real\ntransport: {ros_domain: 87}\n")
-    (config / "inputs.yaml").write_text("primary: keyboard\n")
+    (config / "inputs.yaml").write_text("primary: auto\n")
     return config
 
 
@@ -105,10 +120,10 @@ def all_reaped(root):
         raise AssertionError(f"Child survived supervision: {data['pid']}")
 
 
-def start(root, args, extra=None, stdin=None):
+def start(root, args, extra=None, stdin=None, full=False):
     env = environment(root)
     env.update(extra or {})
-    return subprocess.Popen([str(root / "em_run.sh"), *args], cwd="/tmp", env=env,
+    return subprocess.Popen([str(root / "em_run.sh"), *([] if full else ["--no-simulator", "--no-ui"]), *args], cwd="/tmp", env=env,
                             stdin=stdin or subprocess.DEVNULL, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True)
 
@@ -130,9 +145,58 @@ def check_runtime(root, config):
     out, _ = finish(process, root, 0)
     require("--sim" in out and not captures(root), "Dry run must not start a node")
     require(not (root / "anakin_mc/log").exists(), "Dry run must not generate run logs")
-    process = start(root, [])
+    process = start(root, ["--input", "remote"], full=True)
+    try:
+        wait_for(root, lambda rows: len(rows) == 4)
+        rows = captures(root)
+        require(rows["sim"]["argv"][:8] == ["-r", "g1", "-i", "31", "-n", "lo", "-t", "1"], "Default G1 simulator arguments")
+        require(rows["ui"]["argv"][:2] == ["--domain", "87"], "UI follows ENV ROS domain")
+    finally:
+        process.send_signal(signal.SIGTERM)
+        finish(process, root, 143)
+    process = start(root, ["--sim", "--real-checks"], full=True)
+    try:
+        wait_for(root, lambda rows: len(rows) == 4)
+        rows = captures(root)
+        require("--sim" in rows["anakin_env"]["argv"] and "--real-checks" in rows["anakin_env"]["argv"],
+                "Real checks are forwarded only to the simulation ENV")
+        require(rows["sim"]["argv"][:8] == ["-r", "g1", "-i", "31", "-n", "lo", "-t", "1"],
+                "Real-checks simulation remains on loopback SDK domain 31")
+    finally:
+        process.send_signal(signal.SIGTERM)
+        finish(process, root, 143)
+    custom_rules = root / "real rules with spaces.yaml"
+    custom_rules.write_text("mode: real\ntransport: {ros_domain: 17}\n")
+    process = start(root, ["--sim", "--real-checks", "--real-config", str(custom_rules)])
+    try:
+        wait_for(root, lambda rows: len(rows) == 2)
+        rows = captures(root)
+        require(str(custom_rules) in rows["anakin_env"]["argv"] and rows["anakin_env"]["domain"] == "87",
+                "Custom real checks do not replace simulation transport/domain")
+    finally:
+        process.send_signal(signal.SIGTERM)
+        finish(process, root, 143)
+    process = start(root, ["--real", "--real-checks"])
     finish(process, root, 2)
-    require(not captures(root), "No child should start without a keyboard TTY")
+    require(not captures(root), "Real checks cannot enable hardware transport")
+    process = start(root, ["--real-config", str(custom_rules)])
+    finish(process, root, 2)
+    require(not captures(root), "A real rules path requires explicit real checks")
+    unsafe = root / "unsafe-sim.yaml"
+    unsafe.write_text("mode: sim\ntransport: {ros_domain: 87, interface: eth0, sdk_domain: 31}\n")
+    process = start(root, ["--real-checks", "--config", str(unsafe)])
+    finish(process, root, 2)
+    require(not captures(root), "Real-checks simulation rejects non-loopback transport before spawn")
+    process = start(root, [])
+    try:
+        wait_for(root, lambda rows: len(rows) == 2)
+        require(not captures(root)["anakin_env"]["tty"], "Automatic ENV runs without terminal input")
+    finally:
+        process.send_signal(signal.SIGTERM)
+        finish(process, root, 143)
+    process = start(root, ["--input", "keyboard"])
+    finish(process, root, 2)
+    require(not captures(root), "Removed keyboard source is rejected")
     override = root / "override with spaces.yaml"
     override.write_text("mode: sim\ntransport: {ros_domain: '89'}\n")
     process = start(root, ["--config", str(override), "--input", "remote",
@@ -170,21 +234,13 @@ def check_runtime(root, config):
     process = start(root, ["--input", "remote"], {"TEST_PREFLIGHT_FAIL": "anakin_mc"})
     finish(process, root, 2)
     require(not captures(root), "Reject invalid installation before spawning")
-    master, slave = pty.openpty()
-    before = termios.tcgetattr(slave)
+    process = start(root, [], {"TEST_STUBBORN": "1"})
     try:
-        process = start(root, [], {"TEST_STUBBORN": "1"}, stdin=slave)
-        try:
-            wait_for(root, lambda rows: len(rows) == 2 and
-                     (root / "records/anakin_env.ready").exists())
-            require(captures(root)["anakin_env"]["tty"], "ENV must retain TTY input")
-        finally:
-            process.send_signal(signal.SIGTERM)
-            finish(process, root, 143)
-        require(termios.tcgetattr(slave) == before, "Restore terminal even after a stubborn ENV needs SIGKILL")
+        wait_for(root, lambda rows: len(rows) == 2 and (root / "records/anakin_env.ready").exists())
+        require(not captures(root)["anakin_env"]["tty"], "Stubborn ENV has no terminal dependency")
     finally:
-        os.close(master)
-        os.close(slave)
+        process.send_signal(signal.SIGTERM)
+        finish(process, root, 143)
 
 
 def check_build(root):
@@ -243,7 +299,7 @@ def main():
         config = fixture(root)
         check_runtime(root, config)
         check_build(root)
-    print("PASS: independent build order/failures, domain/args, preflight, TTY, signals, child cleanup, root layout")
+    print("PASS: independent build order/failures, domain/args, preflight, headless input, signals, child cleanup, root layout")
     return 0
 
 
