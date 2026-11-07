@@ -134,6 +134,11 @@ def prepare(args):
             raise ValueError(f"Invalid simulator SDK domain or interface: {config}")
         commands["SIM"] = [str(simulator), "-r", "g1", "-i", str(sdk_domain), "-n", interface, "-t", "1", "-s", str(scene)]
         environments["SIM"] = base.copy()
+        unitree = Path(base.get("UNITREE_SDK2_PREFIX") or "/usr/local")
+        libraries = [str(unitree / "lib"), str(unitree / "lib64")]
+        if base.get("LD_LIBRARY_PATH"):
+            libraries.append(base["LD_LIBRARY_PATH"])
+        environments["SIM"]["LD_LIBRARY_PATH"] = os.pathsep.join(libraries)
     if not args.no_ui:
         ui = ROOT / "ui.sh"
         setup = sdk_prefix / "share/anakin_sdk/local_setup.bash"

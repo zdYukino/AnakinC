@@ -14,15 +14,16 @@ cd AnakinC
 ./em_run.sh
 ```
 
-`boostup.sh` 按父仓锁定的提交初始化 submodule、检查系统依赖，并下载和校验官方 ONNX Runtime 1.20.1。再次执行会复用已校验依赖；有未提交子仓改动时停止，干净子仓则更新到部署锁。无需 `git submodule update --remote`。
+`boostup.sh` 按父仓锁定的提交初始化 submodule、检查系统依赖，并下载和校验官方 ONNX Runtime 1.20.1。未检测到 Unitree SDK2 时会从官方仓库拉取并安装到 `thirdparty/`，再次执行会复用本地安装；有未提交子仓改动时停止，干净子仓则更新到部署锁。无需 `git submodule update --remote`。
 
 `em_run.sh` 默认启动 G1 MuJoCo、仿真模式 ENV、MC 和遥测 UI；浏览器打开 http://127.0.0.1:8765/ 并连接数据源。SDK 是接口库，无需启动。默认在 Unitree 遥控、实体 Joy 和显式激活的网页输入之间自动仲裁，无需终端输入。Ctrl+C、SIGTERM 或任一组件退出都会清理本次启动的进程。UI 首次启动可能安装依赖并构建前端。
 
-首次使用还需按 [Unitree MuJoCo 安装说明](unitree_mujoco/readme.md) 准备 MuJoCo 3.3.6、Unitree SDK2 和系统依赖，然后编译模拟器：
+首次使用还需按 [Unitree MuJoCo 安装说明](unitree_mujoco/readme.md) 准备 MuJoCo 3.3.6 和模拟器系统依赖，然后编译模拟器。若 `boostup.sh` 自动安装了 Unitree SDK2，请将其安装前缀加入 CMake 搜索路径：
 
 ```sh
 ln -s ~/.mujoco/mujoco-3.3.6 unitree_mujoco/simulate/mujoco
-cmake -S unitree_mujoco/simulate -B unitree_mujoco/simulate/build
+cmake -S unitree_mujoco/simulate -B unitree_mujoco/simulate/build \
+  -DCMAKE_PREFIX_PATH="${UNITREE_SDK2_PREFIX:-$PWD/thirdparty/unitree_sdk2-install}"
 cmake --build unitree_mujoco/simulate/build --parallel 4
 ```
 
@@ -42,21 +43,23 @@ cmake --build unitree_mujoco/simulate/build --parallel 4
 
 `--sim --real-checks` 仍只使用仿真回环，从安装目录的 `real.yaml` 加载状态转换、守卫和时序；权限请求经过相同的本地异步流程，但使用模拟服务，不访问机器人的权限服务。要验证自定义实机规则，可增加 `--real-config /absolute/path/robot-real.yaml`。发起受控状态请求时需要新鲜的主输入；输入断连时清零运动指令并保留当前状态。仿真 reset 导致的 tick 回退、坏反馈等仍按 real 规则处理。
 
-如需单独启动模拟器，可使用对应的 G1 29 自由度场景：
+如需单独启动模拟器，可使用对应的 G1 29 自由度场景。本地安装 SDK2 时，先将其 `lib` 加入动态库路径：
 
 ```sh
+export LD_LIBRARY_PATH="${UNITREE_SDK2_PREFIX:-$PWD/thirdparty/unitree_sdk2-install}/lib:${LD_LIBRARY_PATH:-}"
 ./unitree_mujoco/simulate/build/unitree_mujoco \
   -r g1 -i 31 -n lo -t 1 \
   -s "$PWD/unitree_mujoco/unitree_robots/g1/scene_29dof.xml"
 ```
 
-模拟器的安装、启动、摆正与 reset 由用户管理。ENV 输入、状态和实机操作见 [独立运行说明](anakin_env/docs/standalone-operation.md)。
+联合启动会为模拟器设置 Unitree 动态库路径。模拟器的安装、启动、摆正与 reset 由用户管理。ENV 输入、状态和实机操作见 [独立运行说明](anakin_env/docs/standalone-operation.md)。
 
 ## 目录与独立使用
 
 ```text
 AnakinC/
 ├── boostup.sh / build.sh / em_run.sh
+├── thirdparty/              # 自动安装的 Unitree SDK2（不纳入 Git）
 ├── scripts/                 # 初始化检查和联合启动实现
 ├── tests/                   # 使用假子进程的编排回归
 ├── anakin_sdk/              # submodule；消息、服务和合同
@@ -67,7 +70,7 @@ AnakinC/
 
 每个子仓的原生 CMake 产物位于 `build/子仓名/`，安装位于 `install/子仓名/`，构建日志位于 `log/`。ROS 日志也位于对应子仓；联合启动时 MC 输出写入 `anakin_mc/log/run-*/console.log`，ENV 输出保留在终端。主仓根目录不会生成 `build/`、`install/`、`log/`。
 
-单仓不需要 AnakinC 的脚本：
+单仓不需要 AnakinC 的脚本。使用自动安装的 SDK2 时，单独构建或启动 ENV 前先设置 `export UNITREE_SDK2_PREFIX=/path/to/AnakinC/thirdparty/unitree_sdk2-install`：
 
 ```sh
 /path/to/anakin_sdk/build.sh
@@ -83,7 +86,7 @@ ENV 单独入口沿用默认 `real`；父仓联合入口默认 `sim`。单仓默
 
 ## 系统依赖与覆盖
 
-初始化只检查系统依赖，不执行 sudo。需要先配置 ROS 2 Humble 软件源并安装开发依赖，例如：
+初始化不会执行 sudo，也不会安装系统软件包。需要先配置 ROS 2 Humble 软件源并安装开发依赖，例如：
 
 ```sh
 sudo apt install build-essential cmake git python3 python3-yaml \
@@ -93,12 +96,12 @@ sudo apt install build-essential cmake git python3 python3-yaml \
   ros-humble-rmw-fastrtps-cpp
 ```
 
-另外安装 Unitree SDK2，包含其头文件、CMake package 和 Cyclone DDS 动态库。CMake 要求 3.19+；ROS 接口生成默认使用系统 `/usr/bin/python3`。
+Unitree SDK2 默认先查找 `/usr/local`，缺失时克隆官方仓库到 `thirdparty/unitree_sdk2`，并安装到 `thirdparty/unitree_sdk2-install`；源代码和安装结果会保留并复用，不自动更新。`UNITREE_SDK2_PREFIX` 显式指定时只检查该位置，不自动安装或覆盖。CMake 要求 3.19+；ROS 接口生成默认使用系统 `/usr/bin/python3`。
 
 | 变量 | 用途 / 默认 |
 | --- | --- |
 | `ROS_PREFIX` | ROS 安装；`/opt/ros/${ROS_DISTRO:-humble}` |
-| `UNITREE_SDK2_PREFIX` | Unitree SDK2 完整安装前缀；`/usr/local` |
+| `UNITREE_SDK2_PREFIX` | Unitree SDK2 完整安装前缀；优先 `/usr/local`，否则使用 `thirdparty/unitree_sdk2-install` |
 | `ANAKIN_PYTHON` | 包含 ROS 生成依赖及 PyYAML 的 Python；`/usr/bin/python3` |
 | `ANAKIN_BUILD_JOBS` | 编译并行数；8，也可用 `--jobs` |
 | `ANAKIN_SDK_PREFIX` | 单仓构建/运行和联合启动选择 SDK；父构建固定使用本仓 SDK |
@@ -130,6 +133,7 @@ SDK 的安装元数据记录其实际 Git HEAD。修改 SDK 时先提交 SDK，�
 ```sh
 ./build.sh --test
 /usr/bin/python3 tests/orchestration.py
+/usr/bin/python3 tests/unitree_setup.py
 ```
 
 离线检查包括现有 C++ 合同、配置、输入和安装测试，以及假子进程的 无终端启动、信号、退出清理与参数传递；不启动实际 ENV/MC、ROS/DDS、模拟器或机器人。实际仿真和实机行为由使用者另行验收。

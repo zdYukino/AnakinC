@@ -47,6 +47,7 @@ def fixture(root):
     for name in ("em_run.sh", "build.sh"):
         shutil.copy2(SOURCE / name, root / name)
     shutil.copy2(SOURCE / "scripts/run.py", root / "scripts/run.py")
+    shutil.copy2(SOURCE / "scripts/unitree_sdk2.sh", root / "scripts/unitree_sdk2.sh")
     for package in ("anakin_sdk", "anakin_env", "anakin_mc"):
         repo = root / package
         repo.mkdir()
@@ -67,7 +68,7 @@ def fixture(root):
 import json, os, signal, sys, time
 from pathlib import Path
 name = "sim" if "unitree_mujoco" in sys.argv[0] else "ui"
-(Path(os.environ["TEST_RECORDS"]) / (name + ".json")).write_text(json.dumps(dict(pid=os.getpid(), argv=sys.argv[1:])))
+(Path(os.environ["TEST_RECORDS"]) / (name + ".json")).write_text(json.dumps(dict(pid=os.getpid(), argv=sys.argv[1:], libraries=os.environ.get("LD_LIBRARY_PATH", ""))))
 signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 while True: time.sleep(0.05)
@@ -145,12 +146,15 @@ def check_runtime(root, config):
     out, _ = finish(process, root, 0)
     require("--sim" in out and not captures(root), "Dry run must not start a node")
     require(not (root / "anakin_mc/log").exists(), "Dry run must not generate run logs")
-    process = start(root, ["--input", "remote"], full=True)
+    unitree = str(root / "unitree install")
+    process = start(root, ["--input", "remote"], {"UNITREE_SDK2_PREFIX": unitree}, full=True)
     try:
         wait_for(root, lambda rows: len(rows) == 4)
         rows = captures(root)
         require(rows["sim"]["argv"][:8] == ["-r", "g1", "-i", "31", "-n", "lo", "-t", "1"], "Default G1 simulator arguments")
         require(rows["ui"]["argv"][:2] == ["--domain", "87"], "UI follows ENV ROS domain")
+        require(rows["sim"]["libraries"].split(":")[:2] == [unitree + "/lib", unitree + "/lib64"],
+                "Simulator receives Unitree runtime library paths")
     finally:
         process.send_signal(signal.SIGTERM)
         finish(process, root, 143)

@@ -5,3 +5,8 @@ __pycache__/
 /install/
 /log/
 /.deps/
+
+/thirdparty/unitree_sdk2/
+/thirdparty/unitree_sdk2-build/
+/thirdparty/unitree_sdk2-install/
+/thirdparty/.unitree-sdk2-clone.*/
